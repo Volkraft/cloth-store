@@ -10,11 +10,14 @@ function getPool(): Pool {
       throw new Error('DATABASE_URL is not set');
     }
     // Determine if SSL is needed based on connection string
-    const needsSSL = process.env.DATABASE_URL?.includes('vercel') || 
-                     process.env.DATABASE_URL?.includes('neon') || 
-                     process.env.DATABASE_URL?.includes('supabase') ||
-                     process.env.DATABASE_URL?.includes('pooler') ||
-                     process.env.DATABASE_URL?.includes('aws-');
+    // For cloud databases (Supabase, Neon, Vercel), always use SSL with rejectUnauthorized: false
+    const dbUrl = process.env.DATABASE_URL.toLowerCase();
+    const needsSSL = dbUrl.includes('vercel') || 
+                     dbUrl.includes('neon') || 
+                     dbUrl.includes('supabase') ||
+                     dbUrl.includes('pooler') ||
+                     dbUrl.includes('aws-') ||
+                     dbUrl.includes('sslmode=require');
     
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
@@ -29,6 +32,14 @@ function getPool(): Pool {
     });
   }
   return pool;
+}
+
+// Function to reset pool (useful for reconnection after SSL errors)
+function resetPool() {
+  if (pool) {
+    pool.end().catch(() => {}); // Ignore errors when closing
+    pool = null;
+  }
 }
 
 async function ensureSchema() {
@@ -354,6 +365,11 @@ export async function query<T extends Record<string, any> = any>(
       error?.code === 'SELF_SIGNED_CERT_IN_CHAIN' ||
       error?.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
     ) {
+      // If SSL error, reset pool to force recreation with correct SSL settings
+      if (error?.code === 'SELF_SIGNED_CERT_IN_CHAIN' || error?.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE') {
+        console.warn('SSL certificate error detected, resetting connection pool');
+        resetPool();
+      }
       // Log more details for ENOTFOUND to help debug connection string issues
       if (error?.code === 'ENOTFOUND') {
         console.error('Database host not found (ENOTFOUND):', {
