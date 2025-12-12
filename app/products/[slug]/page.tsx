@@ -10,11 +10,18 @@ type Props = {
 
 export default async function ProductPage({ params }: Props) {
   const { slug } = await params;
-  const productRes = await query(
-    `SELECT * FROM products WHERE slug = $1 LIMIT 1`,
-    [slug]
-  );
-  const product = productRes.rows[0];
+  
+  let product;
+  try {
+    const productRes = await query(
+      `SELECT * FROM products WHERE slug = $1 LIMIT 1`,
+      [slug]
+    );
+    product = productRes.rows[0];
+  } catch (error) {
+    console.error("Error fetching product:", error);
+    return notFound();
+  }
 
   if (!product) {
     return notFound();

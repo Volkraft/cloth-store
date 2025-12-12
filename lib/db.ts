@@ -1,21 +1,45 @@
 import { Pool, PoolClient, QueryResult } from "pg";
 
-const pool = new Pool({
-  connectionString: process.env.DATABASE_URL,
-});
-
+let pool: Pool | null = null;
 let schemaInitialized = false;
 
+function getPool(): Pool {
+  // Lazy initialization - only create pool when needed and if DATABASE_URL is set
+  if (!pool) {
+    if (!process.env.DATABASE_URL) {
+      throw new Error('DATABASE_URL is not set');
+    }
+    pool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+    });
+  }
+  return pool;
+}
+
 async function ensureSchema() {
+  // During build time, skip schema initialization if DB is not available
+  if (!process.env.DATABASE_URL) {
+    return;
+  }
+  
   if (schemaInitialized) {
     // Always run migrations even if schema was initialized
-    await runMigrations();
+    try {
+      await runMigrations();
+    } catch (error: any) {
+      if (error?.code === 'ECONNREFUSED' || error?.code === 'ENOTFOUND') {
+        console.warn('Database unavailable, skipping migrations');
+        return;
+      }
+      throw error;
+    }
     return;
   }
   schemaInitialized = true;
 
   // Simple schema for products and orders; variants/colors omitted
-  await pool.query(`
+  try {
+    await getPool().query(`
     CREATE TABLE IF NOT EXISTS products (
       id TEXT PRIMARY KEY,
       name TEXT NOT NULL,
@@ -102,14 +126,35 @@ async function ensureSchema() {
       UNIQUE(product_id, size, color_id)
     );
   `);
+  } catch (error: any) {
+    if (error?.code === 'ECONNREFUSED' || error?.code === 'ENOTFOUND') {
+      console.warn('Database unavailable during schema initialization');
+      return;
+    }
+    throw error;
+  }
   
-  await runMigrations();
+  try {
+    await runMigrations();
+  } catch (error: any) {
+    if (error?.code === 'ECONNREFUSED' || error?.code === 'ENOTFOUND') {
+      console.warn('Database unavailable, skipping migrations');
+      return;
+    }
+    throw error;
+  }
 }
 
 async function runMigrations() {
+  // Skip migrations if DATABASE_URL is not set (build time)
+  if (!process.env.DATABASE_URL) {
+    return;
+  }
+  
   // Migration: Add user_id column to orders if it doesn't exist
   // Only run if users table exists (to avoid foreign key errors)
-  await pool.query(`
+  try {
+    await getPool().query(`
     DO $$
     BEGIN
       IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_name = 'users')
@@ -191,6 +236,13 @@ async function runMigrations() {
       END IF;
     END $$;
   `);
+  } catch (error: any) {
+    if (error?.code === 'ECONNREFUSED' || error?.code === 'ENOTFOUND') {
+      console.warn('Database unavailable, skipping migrations');
+      return;
+    }
+    throw error;
+  }
 }
 
 export async function query<T extends Record<string, any> = any>(
@@ -198,17 +250,56 @@ export async function query<T extends Record<string, any> = any>(
   params: any[] = [],
   client?: PoolClient
 ): Promise<QueryResult<T>> {
-  await ensureSchema();
-  if (client) return client.query<T>(text, params);
-  return pool.query<T>(text, params);
+  // During build time, if DATABASE_URL is not set, return empty result
+  if (!process.env.DATABASE_URL) {
+    return {
+      rows: [] as T[],
+      rowCount: 0,
+      command: 'SELECT',
+      oid: 0,
+      fields: []
+    } as QueryResult<T>;
+  }
+  
+  try {
+    await ensureSchema();
+    if (client) return client.query<T>(text, params);
+    return getPool().query<T>(text, params);
+  } catch (error: any) {
+    // During build time, database might not be available
+    // Return empty result set instead of throwing
+    if (error?.code === 'ECONNREFUSED' || error?.code === 'ENOTFOUND' || error?.message?.includes('DATABASE_URL')) {
+      console.warn('Database connection unavailable during build:', error.message);
+      return {
+        rows: [] as T[],
+        rowCount: 0,
+        command: 'SELECT',
+        oid: 0,
+        fields: []
+      } as QueryResult<T>;
+    }
+    throw error;
+  }
 }
 
 export async function getClient() {
-  await ensureSchema();
-  return pool.connect();
+  if (!process.env.DATABASE_URL) {
+    throw new Error('DATABASE_URL is not set');
+  }
+  try {
+    await ensureSchema();
+    return getPool().connect();
+  } catch (error: any) {
+    if (error?.code === 'ECONNREFUSED' || error?.code === 'ENOTFOUND') {
+      throw new Error('Database connection unavailable');
+    }
+    throw error;
+  }
 }
 
 export async function closePool() {
-  return pool.end();
+  if (pool) {
+    return pool.end();
+  }
 }
 

@@ -2,11 +2,21 @@ import Link from "next/link";
 import ProductCard from "../components/ProductCard";
 import { query } from "../lib/db";
 
+export const dynamic = 'force-dynamic';
+
 export default async function HomePage() {
-  const productsRes = await query(
-    `SELECT * FROM products ORDER BY display_order DESC, created_at DESC LIMIT 100`
-  );
-  const products = productsRes.rows;
+  let products: any[] = [];
+  
+  try {
+    const productsRes = await query(
+      `SELECT * FROM products ORDER BY display_order DESC, created_at DESC LIMIT 100`
+    );
+    products = productsRes.rows;
+  } catch (error) {
+    console.error("Error fetching products:", error);
+    // During build, database might not be available, return empty array
+    products = [];
+  }
 
   return (
     <div className="space-y-6">
