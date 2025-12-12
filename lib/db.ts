@@ -19,16 +19,36 @@ function getPool(): Pool {
                      dbUrl.includes('aws-') ||
                      dbUrl.includes('sslmode=require');
     
+    // For cloud databases, always use SSL with rejectUnauthorized: false
+    // This allows self-signed certificates which are common in cloud database services
+    const sslConfig = needsSSL ? { 
+      rejectUnauthorized: false 
+    } : undefined;
+    
+    if (needsSSL && process.env.NODE_ENV === 'development') {
+      console.log('Using SSL connection with rejectUnauthorized: false for cloud database');
+    }
+    
+    // Set NODE_TLS_REJECT_UNAUTHORIZED for this process if needed (as fallback)
+    if (needsSSL && !process.env.NODE_TLS_REJECT_UNAUTHORIZED) {
+      process.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+    }
+    
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: needsSSL 
-        ? { 
-            rejectUnauthorized: false // Allow self-signed certificates for cloud databases
-          } 
-        : undefined,
+      ssl: sslConfig,
       max: 20,
       idleTimeoutMillis: 30000,
       connectionTimeoutMillis: 10000,
+    });
+    
+    // Handle pool errors
+    pool.on('error', (err: any) => {
+      console.error('Unexpected error on idle client', err);
+      if (err?.code === 'SELF_SIGNED_CERT_IN_CHAIN') {
+        console.warn('SSL certificate error in pool, resetting...');
+        resetPool();
+      }
     });
   }
   return pool;
@@ -367,8 +387,15 @@ export async function query<T extends Record<string, any> = any>(
     ) {
       // If SSL error, reset pool to force recreation with correct SSL settings
       if (error?.code === 'SELF_SIGNED_CERT_IN_CHAIN' || error?.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE') {
-        console.warn('SSL certificate error detected, resetting connection pool');
+        console.error('SSL certificate error detected:', {
+          code: error?.code,
+          message: error?.message,
+          databaseUrl: process.env.DATABASE_URL?.substring(0, 50) + '...'
+        });
+        console.warn('Resetting connection pool to apply SSL settings');
         resetPool();
+        // Reset schema flag to allow retry
+        schemaInitialized = false;
       }
       // Log more details for ENOTFOUND to help debug connection string issues
       if (error?.code === 'ENOTFOUND') {

@@ -27,7 +27,13 @@ const orderSchema = z.object({
 export async function POST(request: NextRequest) {
   try {
     const session = await getServerSession(authOptions);
-    const userId = session?.user?.id || null;
+    let userId = session?.user?.id || null;
+
+    // Admin users have id="admin" which doesn't exist in users table
+    // Set user_id to null for admin orders (they're not real users in DB)
+    if (userId === 'admin') {
+      userId = null;
+    }
 
     const body = await request.json();
     const parsed = orderSchema.parse(body);
