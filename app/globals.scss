@@ -1,0 +1,61 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: light;
+}
+
+body {
+  min-height: 100vh;
+  background: #f7f7f7;
+  background-image: url('/background.svg');
+  background-size: 80%;
+  background-repeat: repeat;
+  font-family: var(--font-beatrice-deck-trial);
+  
+}
+.admin-font {
+  font-family: var(--font-geist-sans), sans-serif;
+  
+  // Улучшенные стили для админки
+  input[type="text"],
+  input[type="number"],
+  input[type="email"],
+  input[type="password"],
+  textarea,
+  select {
+    &::placeholder {
+      color: #9ca3af;
+    }
+  }
+  
+  // Стили для скроллбара в админке
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  
+  ::-webkit-scrollbar-track {
+    background: #f1f1f1;
+  }
+  
+  ::-webkit-scrollbar-thumb {
+    background: #c1c1c1;
+    border-radius: 4px;
+    
+    &:hover {
+      background: #a8a8a8;
+    }
+  }
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button {
+  cursor: pointer;
+}
+
