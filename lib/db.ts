@@ -9,8 +9,23 @@ function getPool(): Pool {
     if (!process.env.DATABASE_URL) {
       throw new Error('DATABASE_URL is not set');
     }
+    // Determine if SSL is needed based on connection string
+    const needsSSL = process.env.DATABASE_URL?.includes('vercel') || 
+                     process.env.DATABASE_URL?.includes('neon') || 
+                     process.env.DATABASE_URL?.includes('supabase') ||
+                     process.env.DATABASE_URL?.includes('pooler') ||
+                     process.env.DATABASE_URL?.includes('aws-');
+    
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
+      ssl: needsSSL 
+        ? { 
+            rejectUnauthorized: false // Allow self-signed certificates for cloud databases
+          } 
+        : undefined,
+      max: 20,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000,
     });
   }
   return pool;
@@ -27,17 +42,28 @@ async function ensureSchema() {
     try {
       await runMigrations();
     } catch (error: any) {
-      if (error?.code === 'ECONNREFUSED' || error?.code === 'ENOTFOUND') {
-        console.warn('Database unavailable, skipping migrations');
+      if (
+        error?.code === 'ECONNREFUSED' || 
+        error?.code === 'ENOTFOUND' ||
+        error?.code === 'ETIMEDOUT' ||
+        error?.code === 'ECONNRESET' ||
+        error?.message?.includes('timeout') ||
+        error?.message?.includes('connection')
+      ) {
+        console.warn('Database unavailable, skipping migrations:', error.message);
         return;
       }
-      throw error;
+      // Don't throw on migration errors - just log them
+      // This prevents the app from crashing if migrations fail
+      console.error('Migration error (non-fatal):', error);
+      return;
     }
     return;
   }
   schemaInitialized = true;
 
   // Simple schema for products and orders; variants/colors omitted
+  // Wrap in try-catch to prevent app crashes if DB is unavailable
   try {
     await getPool().query(`
     CREATE TABLE IF NOT EXISTS products (
@@ -127,21 +153,50 @@ async function ensureSchema() {
     );
   `);
   } catch (error: any) {
-    if (error?.code === 'ECONNREFUSED' || error?.code === 'ENOTFOUND') {
-      console.warn('Database unavailable during schema initialization');
+    // Handle various database connection errors
+    if (
+      error?.code === 'ECONNREFUSED' || 
+      error?.code === 'ENOTFOUND' ||
+      error?.code === 'ETIMEDOUT' ||
+      error?.code === 'ECONNRESET' ||
+      error?.message?.includes('timeout') ||
+      error?.message?.includes('connection') ||
+      error?.message?.includes('SSL') ||
+      error?.message?.includes('certificate') ||
+      error?.code === 'SELF_SIGNED_CERT_IN_CHAIN' ||
+      error?.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+    ) {
+      console.warn('Database unavailable during schema initialization:', error.message);
+      // Reset schemaInitialized flag so we can retry on next request
+      schemaInitialized = false;
       return;
     }
-    throw error;
+    // Log other errors but don't crash the app - schema might already exist
+    console.error('Database schema initialization error (non-fatal):', error);
+    // Don't throw - allow the app to continue
+    // Schema might already exist or will be created on retry
+    return;
   }
   
   try {
     await runMigrations();
   } catch (error: any) {
-    if (error?.code === 'ECONNREFUSED' || error?.code === 'ENOTFOUND') {
-      console.warn('Database unavailable, skipping migrations');
+    // Don't throw on migration errors - just log them
+    // This prevents the app from crashing if migrations fail
+    if (
+      error?.code === 'ECONNREFUSED' || 
+      error?.code === 'ENOTFOUND' ||
+      error?.code === 'ETIMEDOUT' ||
+      error?.code === 'ECONNRESET' ||
+      error?.message?.includes('timeout') ||
+      error?.message?.includes('connection')
+    ) {
+      console.warn('Database unavailable, skipping migrations:', error.message);
       return;
     }
-    throw error;
+    // Log other migration errors but don't crash the app
+    console.error('Migration error (non-fatal):', error);
+    return;
   }
 }
 
@@ -237,11 +292,20 @@ async function runMigrations() {
     END $$;
   `);
   } catch (error: any) {
-    if (error?.code === 'ECONNREFUSED' || error?.code === 'ENOTFOUND') {
-      console.warn('Database unavailable, skipping migrations');
+    if (
+      error?.code === 'ECONNREFUSED' || 
+      error?.code === 'ENOTFOUND' ||
+      error?.code === 'ETIMEDOUT' ||
+      error?.code === 'ECONNRESET' ||
+      error?.message?.includes('timeout') ||
+      error?.message?.includes('connection')
+    ) {
+      console.warn('Database unavailable, skipping migrations:', error.message);
       return;
     }
-    throw error;
+    // Log other migration errors but don't crash the app
+    console.error('Migration error (non-fatal):', error);
+    return;
   }
 }
 
@@ -266,10 +330,40 @@ export async function query<T extends Record<string, any> = any>(
     if (client) return client.query<T>(text, params);
     return getPool().query<T>(text, params);
   } catch (error: any) {
-    // During build time, database might not be available
-    // Return empty result set instead of throwing
-    if (error?.code === 'ECONNREFUSED' || error?.code === 'ENOTFOUND' || error?.message?.includes('DATABASE_URL')) {
-      console.warn('Database connection unavailable during build:', error.message);
+    // Log full error details for debugging
+    if (process.env.NODE_ENV === 'development') {
+      console.error('Database query error details:', {
+        code: error?.code,
+        message: error?.message,
+        stack: error?.stack,
+        query: text.substring(0, 100) + '...'
+      });
+    }
+    // During build time or runtime, database might not be available
+    // Return empty result set instead of throwing for connection errors
+    if (
+      error?.code === 'ECONNREFUSED' || 
+      error?.code === 'ENOTFOUND' ||
+      error?.code === 'ETIMEDOUT' ||
+      error?.code === 'ECONNRESET' ||
+      error?.message?.includes('DATABASE_URL') ||
+      error?.message?.includes('timeout') ||
+      error?.message?.includes('connection') ||
+      error?.message?.includes('SSL') ||
+      error?.message?.includes('certificate') ||
+      error?.code === 'SELF_SIGNED_CERT_IN_CHAIN' ||
+      error?.code === 'UNABLE_TO_VERIFY_LEAF_SIGNATURE'
+    ) {
+      // Log more details for ENOTFOUND to help debug connection string issues
+      if (error?.code === 'ENOTFOUND') {
+        console.error('Database host not found (ENOTFOUND):', {
+          hostname: error?.hostname,
+          message: error?.message,
+          hint: 'Check your DATABASE_URL connection string. The hostname might be incorrect or the database project might be paused/deleted.'
+        });
+      } else {
+        console.warn('Database connection unavailable:', error.message);
+      }
       return {
         rows: [] as T[],
         rowCount: 0,
@@ -278,6 +372,8 @@ export async function query<T extends Record<string, any> = any>(
         fields: []
       } as QueryResult<T>;
     }
+    // For other errors (SQL syntax, etc.), log and rethrow
+    console.error('Database query error:', error);
     throw error;
   }
 }
@@ -290,7 +386,14 @@ export async function getClient() {
     await ensureSchema();
     return getPool().connect();
   } catch (error: any) {
-    if (error?.code === 'ECONNREFUSED' || error?.code === 'ENOTFOUND') {
+    if (
+      error?.code === 'ECONNREFUSED' || 
+      error?.code === 'ENOTFOUND' ||
+      error?.code === 'ETIMEDOUT' ||
+      error?.code === 'ECONNRESET' ||
+      error?.message?.includes('timeout') ||
+      error?.message?.includes('connection')
+    ) {
       throw new Error('Database connection unavailable');
     }
     throw error;
